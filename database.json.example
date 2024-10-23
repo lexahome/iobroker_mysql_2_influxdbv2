@@ -7,13 +7,11 @@
     "password": "xxxx"
   },
   "InfluxDB": {
-    "host": "localhost",
-    "ssl": false,
-    "port": 8086,
-    "database": "iobroker",
-    "retention_policy": "autogen",
-    "user": "xxxx",
-    "password": "xxxx",
+    "bucket": "bucket",
+    "url": "http://localhost:8086",
+    "org": "org",
+    "token": "token",
+    "delete_old": true
     "store_ack_boolean": true
   }
 }

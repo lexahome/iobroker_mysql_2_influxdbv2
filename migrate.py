@@ -1,15 +1,12 @@
 import json
 import os
 import sys
-import time
-
-try:
-    from influxdb import InfluxDBClient
-    import pymysql
-except Exception as ex:
-    print(ex)
-    print("Please install all requirements!")
-    sys.exit(1)
+from datetime import datetime, timezone
+from influxdb_client import Point, WriteOptions
+import influxdb_client
+import influxdb_client.client
+import influxdb_client.client.write
+import pymysql
 
 if not sys.version_info >= (3, 6):
     print("Python version to old!")
@@ -52,14 +49,11 @@ except Exception as ex:
     print(ex)
     sys.exit(1)
 
-
-INFLUXDB_CONNECTION = InfluxDBClient(host=db['InfluxDB']['host'],
-                                     ssl=db['InfluxDB']['ssl'],
-                                     verify_ssl=True,
-                                     port=db['InfluxDB']['port'],
-                                     username=db['InfluxDB']['user'],
-                                     password=db['InfluxDB']['password'],
-                                     database=db['InfluxDB']['database'])
+client = influxdb_client.InfluxDBClient(
+   url=db["InfluxDB"]["url"],
+   token=db["InfluxDB"]["token"],
+   org=db["InfluxDB"]["org"]
+)
 
 # Select datapoints
 if len(sys.argv) > 1 and sys.argv[1].upper().strip() == "ALL":
@@ -88,6 +82,15 @@ SCHEMA = {
 
 DATATYPES = ["float", "string", "boolean"]
 
+def  is_number_tryexcept(s):
+    """ Returns True if string is a number. """
+    try:
+        float(s)
+        return True
+    except ValueError:
+        return False
+
+
 #####
 # Generates an collection of influxdb points from the given SQL records
 #####
@@ -111,18 +114,22 @@ def generate_influx_points(datatype, records):
             # Daten in richtigen Typ wandeln
             if field_label == "value":
                 if datatype == 0: # ts_number
-                    fields["value"] = float(record["value"])
+                    if is_number_tryexcept(record["value"]):
+                      fields["value"] = float(record["value"])
+                    else:
+                      fields["value"] = ""
                 elif datatype == 1: # ts_string
                     fields["value"] = str(record["value"])
                 elif datatype == 2: # ts_bool
                     fields["value"] = bool(record["value"])
-
-        influx_points.append({
-            "measurement": record[SCHEMA['table_name_to_measurement']],
-            # "tags": tags,
-            "time": record[SCHEMA['time_column']],
-            "fields": fields
-        })
+        #influx_points.append
+        if fields["value"] != "":
+          influx_points.append(Point(record[SCHEMA['table_name_to_measurement']])
+                              .time(record[SCHEMA['time_column']])
+                              .field(field="ack", value=record["ack"])
+                              .field(field="from", value=record["from"])
+                              .field(field="q", value=record["q"])
+                              .field(field="value", value=record["value"]))
 
     return influx_points
 
@@ -146,6 +153,13 @@ def migrate_datapoints(table):
     processed_rows = 0
     for metric in metrics:
         metric_nr += 1
+        if db["InfluxDB"]["org"] == True:
+            delete_api = client.delete_api()
+            start = datetime(1970, 1, 1, tzinfo=timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+            end = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+            predicate = '_measurement=' + '"' + metric["name"] + '"'
+
+            delete_api.delete(start, end, predicate=predicate, org="Home", bucket="iobroker")
         print(metric['name'] + "(ID: " + str(metric['id']) + ", type: " + DATATYPES[metric['type']] + ")" +
               " (" + str(metric_nr) + "/" + str(metric_count) + ")")
 
@@ -161,7 +175,7 @@ def migrate_datapoints(table):
                                 FROM """ + table + """ AS m
                                 LEFT JOIN datapoints AS d ON m.id=d.id
                                 LEFT JOIN sources AS s ON m._from=s.id
-                                WHERE q=0 AND d.id = """ + str(metric['id']) + """
+                                WHERE q=0 AND d.id = """ + str(metric['id']) + """ AND m.val IS NOT NULL
                                 ORDER BY m.ts desc
                                 LIMIT """ + str(start_row) + """, """ + str(query_max_rows)
             MYSQL_CURSOR.execute(query)
@@ -177,10 +191,11 @@ def migrate_datapoints(table):
                 print(f"Processing row {processed_rows + 1:,} to {processed_rows + len(selected_rows):,} from LIMIT {start_row:,} / {start_row + query_max_rows:,} " +
                       table + " - " + metric['name'] + " (" + str(metric_nr) + "/" + str(metric_count) + ")")
                 migrated_datapoints += len(selected_rows)
-
+                ip = generate_influx_points(metric['type'], selected_rows)
+                write_api = client.write_api(write_options=WriteOptions(batch_size=50_000, flush_interval=10_000))
                 try:
-                    INFLUXDB_CONNECTION.write_points(generate_influx_points(metric['type'], 
-                        selected_rows), retention_policy=db['InfluxDB']['retention_policy'])
+                    write_api.write("iobroker", "Home", ip)
+                    write_api.close()
                 except Exception as ex:
                     print("InfluxDB error")
                     print(ex)
